@@ -26,8 +26,9 @@ Preferred communication style: Simple, everyday language.
 - **Interactive Components**: File uploader, page selector, table preview, and export buttons
 
 **Key Design Decisions**:
-- Session state stores `extracted_tables` (list of page/dataframe tuples) and `pdf_pages` (total page count)
-- This allows users to extract tables once and perform multiple exports without re-processing
+- Session state stores `extracted_tables` (list of dicts with id, page, original_headers, and dataframe), `edited_tables` (dict mapping table IDs to edited DataFrames), `merge_config` (merge settings), and `merged_preview` (preview of merged result)
+- This allows users to extract tables once, edit them, configure merges, and perform multiple exports without re-processing
+- Each table gets a unique ID for tracking edits across session reruns
 
 ### Backend Architecture
 
@@ -42,8 +43,20 @@ Preferred communication style: Simple, everyday language.
 
 **Data Flow**:
 ```
-PDF Upload → Page Selection → Table Extraction → DataFrame Conversion → Data Cleaning → Session Storage → Export
+PDF Upload → Page Selection → Table Extraction → DataFrame Conversion → Data Cleaning → Session Storage → Table Editing → (Optional) Table Merging → Export
 ```
+
+**Table Editing Features** (Added November 2025):
+- Inline editing of column headers and cell values using Streamlit's data_editor
+- Real-time updates stored in session state
+- Tab-based interface for editing multiple tables simultaneously
+
+**Table Merging Features** (Added November 2025):
+- Smart column mapping wizard for combining multiple tables
+- Auto-matching of columns with identical names
+- Manual column mapping via dropdown selectors
+- Merge preview before download
+- Handles tables with different column structures
 
 **Error Handling Approach**:
 - Page number validation (0-indexed internally, 1-indexed for display)
@@ -58,8 +71,11 @@ PDF Upload → Page Selection → Table Extraction → DataFrame Conversion → 
 - All data is lost when session ends (by design for privacy/security)
 
 **Data Structures**:
-- `extracted_tables`: List[Tuple[int, pd.DataFrame]] - stores page number and corresponding table data
+- `extracted_tables`: List[Dict[str, Any]] - stores table metadata including id, page number, original headers, and DataFrame
+- `edited_tables`: Dict[int, pd.DataFrame] - stores user-edited versions of tables by table ID
 - `pdf_pages`: int - tracks total pages in uploaded PDF
+- `merge_config`: Dict - configuration for merged tables including selected tables and column mappings
+- `merged_preview`: pd.DataFrame - preview of merged table result
 
 ### Export Functionality
 

@@ -2,7 +2,7 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import io
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any, Optional
 import xlsxwriter
 
 # Configure page
@@ -15,10 +15,16 @@ st.set_page_config(
 # Initialize session state
 if 'extracted_tables' not in st.session_state:
     st.session_state.extracted_tables = []
+if 'edited_tables' not in st.session_state:
+    st.session_state.edited_tables = {}
 if 'pdf_pages' not in st.session_state:
     st.session_state.pdf_pages = 0
+if 'merge_config' not in st.session_state:
+    st.session_state.merge_config = None
+if 'merged_preview' not in st.session_state:
+    st.session_state.merged_preview = None
 
-def extract_tables_from_pdf(pdf_file, selected_pages=None) -> List[Tuple[int, pd.DataFrame]]:
+def extract_tables_from_pdf(pdf_file, selected_pages: Optional[List[int]] = None) -> List[Dict[str, Any]]:
     """
     Extract tables from PDF file.
     
@@ -27,9 +33,10 @@ def extract_tables_from_pdf(pdf_file, selected_pages=None) -> List[Tuple[int, pd
         selected_pages: List of page numbers to extract from (0-indexed), or None for all pages
     
     Returns:
-        List of tuples containing (page_number, dataframe)
+        List of dictionaries containing table metadata and data
     """
     tables_data = []
+    table_id = 0
     
     with pdfplumber.open(pdf_file) as pdf:
         pages_to_process = selected_pages if selected_pages else range(len(pdf.pages))
@@ -40,63 +47,89 @@ def extract_tables_from_pdf(pdf_file, selected_pages=None) -> List[Tuple[int, pd
                 tables = page.extract_tables()
                 
                 for table_idx, table in enumerate(tables):
-                    if table and len(table) > 0:
-                        # Convert to DataFrame
-                        df = pd.DataFrame(table[1:], columns=table[0])
-                        # Clean up empty columns and rows
-                        df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-                        
-                        if not df.empty:
-                            tables_data.append((page_num + 1, df))  # Store 1-indexed page number
+                    if table and len(table) > 0 and len(table) > 1:
+                        try:
+                            # Handle None values in headers
+                            headers = [str(h) if h is not None else f"Column_{i}" for i, h in enumerate(table[0])]
+                            # Create DataFrame with safe headers
+                            df = pd.DataFrame(table[1:], columns=headers)
+                            # Clean up empty columns and rows
+                            df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+                            
+                            if not df.empty:
+                                tables_data.append({
+                                    'id': table_id,
+                                    'page': page_num + 1,  # 1-indexed for display
+                                    'original_headers': list(df.columns),
+                                    'dataframe': df.copy()
+                                })
+                                table_id += 1
+                        except Exception as e:
+                            st.warning(f"Could not extract table on page {page_num + 1}: {str(e)}")
+                            continue
     
     return tables_data
 
-def create_excel_file(tables_data: List[Tuple[int, pd.DataFrame]], merge_tables=False) -> bytes:
+def merge_tables_with_mapping(tables: List[Dict[str, Any]], column_mapping: Dict[str, Dict[int, str]]) -> pd.DataFrame:
     """
-    Create Excel file from extracted tables.
+    Merge selected tables using the provided column mapping.
     
     Args:
-        tables_data: List of tuples containing (page_number, dataframe)
-        merge_tables: If True, merge all tables into one sheet
+        tables: List of table dictionaries to merge
+        column_mapping: Dict mapping target columns to {table_id: source_column}
     
     Returns:
-        Excel file as bytes
+        Merged DataFrame
     """
+    all_data = []
+    
+    for table in tables:
+        table_id = table['id']
+        df = st.session_state.edited_tables.get(table_id, table['dataframe']).copy()
+        
+        # Create a new DataFrame with standardized columns
+        standardized_df = pd.DataFrame()
+        
+        for target_col, source_mapping in column_mapping.items():
+            if table_id in source_mapping:
+                source_col = source_mapping[table_id]
+                if source_col in df.columns:
+                    standardized_df[target_col] = df[source_col]
+                else:
+                    standardized_df[target_col] = None
+            else:
+                standardized_df[target_col] = None
+        
+        all_data.append(standardized_df)
+    
+    if all_data:
+        return pd.concat(all_data, ignore_index=True)
+    return pd.DataFrame()
+
+def create_excel_file(tables_data: List[Tuple[int, pd.DataFrame]], merge_tables: bool = False) -> bytes:
+    """Create Excel file from tables."""
     output = io.BytesIO()
     
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:  # type: ignore
         if merge_tables and len(tables_data) > 0:
-            # Merge all tables into one DataFrame
             merged_df = pd.concat([df for _, df in tables_data], ignore_index=True)
             merged_df.to_excel(writer, sheet_name='All Tables', index=False)
         else:
-            # Create separate sheet for each table
             for idx, (page_num, df) in enumerate(tables_data):
-                sheet_name = f'Page {page_num} Table {idx + 1}'[:31]  # Excel sheet name limit
+                sheet_name = f'Page {page_num} Table {idx + 1}'[:31]
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
     
     output.seek(0)
     return output.getvalue()
 
-def create_csv_file(tables_data: List[Tuple[int, pd.DataFrame]], merge_tables=False) -> bytes:
-    """
-    Create CSV file from extracted tables.
-    
-    Args:
-        tables_data: List of tuples containing (page_number, dataframe)
-        merge_tables: If True, merge all tables into one CSV
-    
-    Returns:
-        CSV file as bytes
-    """
+def create_csv_file(tables_data: List[Tuple[int, pd.DataFrame]], merge_tables: bool = False) -> bytes:
+    """Create CSV file from tables."""
     output = io.StringIO()
     
     if merge_tables and len(tables_data) > 0:
-        # Merge all tables into one DataFrame
         merged_df = pd.concat([df for _, df in tables_data], ignore_index=True)
         merged_df.to_csv(output, index=False)
     else:
-        # Concatenate all tables with separators
         for idx, (page_num, df) in enumerate(tables_data):
             if idx > 0:
                 output.write(f"\n\n--- Page {page_num} Table {idx + 1} ---\n")
@@ -109,15 +142,14 @@ def create_csv_file(tables_data: List[Tuple[int, pd.DataFrame]], merge_tables=Fa
 # App UI
 st.title("📄 PDF Table Extractor")
 st.markdown("""
-Welcome! This tool helps you extract tables from PDF files easily.
+Welcome! This tool helps you extract, edit, and merge tables from PDF files.
 
 ### How to use:
-1. **Upload** your PDF file using the file uploader below
-2. **Select pages** (optional) - choose specific pages or extract from all pages
-3. **Preview** the extracted tables to verify the data
-4. **Download** your data in CSV or Excel format
-
-Let's get started! 👇
+1. **Upload** your PDF file
+2. **Select pages** to extract from (optional)
+3. **Edit tables** - modify headers and data as needed
+4. **Merge tables** - combine multiple tables with smart column mapping (optional)
+5. **Download** your data in CSV or Excel format
 """)
 
 st.divider()
@@ -130,13 +162,11 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # Display file info
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.success(f"✅ File uploaded: **{uploaded_file.name}**")
     
-    # Get PDF information
     with pdfplumber.open(uploaded_file) as pdf:
         total_pages = len(pdf.pages)
         st.session_state.pdf_pages = total_pages
@@ -146,9 +176,8 @@ if uploaded_file is not None:
     
     st.divider()
     
-    # Page selection section
+    # Page selection
     st.subheader("📑 Page Selection")
-    
     col1, col2 = st.columns([1, 2])
     
     with col1:
@@ -165,23 +194,21 @@ if uploaded_file is not None:
             page_input = st.text_input(
                 "Enter page numbers",
                 placeholder="e.g., 1,3,5-7",
-                help="Enter page numbers separated by commas. You can use ranges like '5-7' for pages 5, 6, and 7."
+                help="Enter page numbers separated by commas. You can use ranges like '5-7'."
             )
             
             if page_input:
                 try:
-                    # Parse page numbers
                     pages = []
                     parts = page_input.split(',')
                     for part in parts:
                         part = part.strip()
                         if '-' in part:
                             start, end = map(int, part.split('-'))
-                            pages.extend(range(start - 1, end))  # Convert to 0-indexed
+                            pages.extend(range(start - 1, end))
                         else:
-                            pages.append(int(part) - 1)  # Convert to 0-indexed
+                            pages.append(int(part) - 1)
                     
-                    # Filter valid pages
                     selected_pages = [p for p in pages if 0 <= p < total_pages]
                     
                     if selected_pages:
@@ -189,106 +216,278 @@ if uploaded_file is not None:
                     else:
                         st.warning("No valid page numbers entered.")
                 except ValueError:
-                    st.error("Invalid format. Please use numbers separated by commas (e.g., 1,3,5-7)")
+                    st.error("Invalid format. Use numbers separated by commas (e.g., 1,3,5-7)")
     
     st.divider()
     
     # Extract button
     if st.button("🔍 Extract Tables", type="primary", use_container_width=True):
         with st.spinner("Extracting tables from PDF..."):
-            # Reset file pointer
             uploaded_file.seek(0)
-            
-            # Extract tables
             tables_data = extract_tables_from_pdf(uploaded_file, selected_pages)
             st.session_state.extracted_tables = tables_data
+            st.session_state.edited_tables = {}
+            st.session_state.merge_config = None
+            st.session_state.merged_preview = None
             
             if len(tables_data) > 0:
                 st.success(f"✅ Successfully extracted **{len(tables_data)}** table(s)!")
             else:
-                st.warning("⚠️ No tables found in the selected pages. The PDF might not contain recognizable tables.")
+                st.warning("⚠️ No tables found. The PDF might not contain recognizable tables.")
     
-    # Display extracted tables
+    # Display and edit tables
     if len(st.session_state.extracted_tables) > 0:
         st.divider()
-        st.subheader("📊 Extracted Tables Preview")
+        st.subheader("✏️ Edit Tables")
+        st.markdown("You can edit column headers and cell values directly in the tables below.")
         
         # Create tabs for each table
-        for idx, (page_num, df) in enumerate(st.session_state.extracted_tables):
-            with st.expander(f"📄 Table {idx + 1} (from Page {page_num}) - {len(df)} rows × {len(df.columns)} columns", expanded=(idx == 0)):
-                st.dataframe(df, use_container_width=True)
+        tabs = st.tabs([f"Table {idx + 1} (Page {table['page']})" for idx, table in enumerate(st.session_state.extracted_tables)])
+        
+        for idx, (tab, table) in enumerate(zip(tabs, st.session_state.extracted_tables)):
+            with tab:
+                table_id = table['id']
+                
+                # Get current version (edited or original)
+                if table_id in st.session_state.edited_tables:
+                    current_df = st.session_state.edited_tables[table_id]
+                else:
+                    current_df = table['dataframe']
+                
+                st.markdown(f"**Table {idx + 1}** from Page {table['page']} - {len(current_df)} rows × {len(current_df.columns)} columns")
+                
+                # Editable data editor
+                edited_df = st.data_editor(
+                    current_df,
+                    use_container_width=True,
+                    num_rows="dynamic",
+                    key=f"editor_{table_id}"
+                )
+                
+                # Store edited version
+                st.session_state.edited_tables[table_id] = edited_df
+        
+        st.divider()
+        
+        # Merge Tables Section
+        if len(st.session_state.extracted_tables) > 1:
+            st.subheader("🔀 Merge Tables (Optional)")
+            
+            with st.expander("Configure Table Merge", expanded=False):
+                st.markdown("""
+                Merge multiple tables into one by mapping columns. Columns with the same name will be automatically matched.
+                You can also manually map different column names to combine them.
+                """)
+                
+                # Table selection
+                st.markdown("#### Step 1: Select Tables to Merge")
+                selected_table_ids = []
+                
+                cols = st.columns(min(3, len(st.session_state.extracted_tables)))
+                for idx, table in enumerate(st.session_state.extracted_tables):
+                    with cols[idx % 3]:
+                        if st.checkbox(
+                            f"Table {idx + 1} (Page {table['page']})",
+                            value=True,
+                            key=f"select_{table['id']}"
+                        ):
+                            selected_table_ids.append(table['id'])
+                
+                if len(selected_table_ids) > 1:
+                    st.divider()
+                    st.markdown("#### Step 2: Column Mapping")
+                    
+                    selected_tables = [t for t in st.session_state.extracted_tables if t['id'] in selected_table_ids]
+                    
+                    # Get all unique columns from selected tables
+                    all_columns_by_table = {}
+                    all_unique_columns = set()
+                    
+                    for table in selected_tables:
+                        df = st.session_state.edited_tables.get(table['id'], table['dataframe'])
+                        all_columns_by_table[table['id']] = list(df.columns)
+                        all_unique_columns.update(df.columns)
+                    
+                    # Auto-match columns with same names
+                    st.info(f"📊 Found {len(all_unique_columns)} unique column(s) across selected tables")
+                    
+                    # Show column mapping interface
+                    column_mapping = {}
+                    
+                    for col_name in sorted(all_unique_columns):
+                        with st.container():
+                            st.markdown(f"**Target Column: `{col_name}`**")
+                            
+                            mapping_for_col = {}
+                            cols = st.columns(len(selected_tables))
+                            
+                            for idx, (col, table) in enumerate(zip(cols, selected_tables)):
+                                with col:
+                                    table_id = table['id']
+                                    table_cols = all_columns_by_table[table_id]
+                                    
+                                    # Default to same column name if it exists
+                                    default_idx = table_cols.index(col_name) if col_name in table_cols else 0
+                                    
+                                    # Add "Skip" option
+                                    options = ["(Skip)"] + table_cols
+                                    default_selection = default_idx + 1 if col_name in table_cols else 0
+                                    
+                                    selected = st.selectbox(
+                                        f"Table {idx + 1}",
+                                        options=options,
+                                        index=default_selection,
+                                        key=f"map_{col_name}_{table_id}"
+                                    )
+                                    
+                                    if selected != "(Skip)":
+                                        mapping_for_col[table_id] = selected
+                            
+                            if mapping_for_col:
+                                column_mapping[col_name] = mapping_for_col
+                    
+                    st.divider()
+                    
+                    # Preview merged table
+                    if st.button("🔍 Preview Merged Table", use_container_width=True):
+                        with st.spinner("Creating merge preview..."):
+                            try:
+                                merged_df = merge_tables_with_mapping(selected_tables, column_mapping)
+                                st.session_state.merged_preview = merged_df
+                                st.session_state.merge_config = {
+                                    'tables': selected_tables,
+                                    'mapping': column_mapping
+                                }
+                                st.success("✅ Merge preview created!")
+                            except Exception as e:
+                                st.error(f"Error creating merge preview: {str(e)}")
+                    
+                    if st.session_state.merged_preview is not None:
+                        st.markdown("#### Merged Table Preview")
+                        st.dataframe(st.session_state.merged_preview, use_container_width=True)
+                        st.info(f"📊 Merged table: {len(st.session_state.merged_preview)} rows × {len(st.session_state.merged_preview.columns)} columns")
+                
+                elif len(selected_table_ids) == 1:
+                    st.warning("Select at least 2 tables to merge")
+                else:
+                    st.warning("No tables selected")
         
         st.divider()
         
         # Download section
         st.subheader("💾 Download Options")
         
-        col1, col2, col3 = st.columns(3)
+        # Determine what to download
+        download_mode = st.radio(
+            "What would you like to download?",
+            ["Individual tables (edited)", "Merged table (if configured)"],
+            help="Choose whether to download individual tables or the merged result"
+        )
         
-        with col1:
-            merge_tables = st.checkbox(
-                "Merge all tables",
-                value=False,
-                help="Combine all tables into a single file/sheet"
-            )
-        
-        with col2:
-            download_format = st.selectbox(
-                "File format",
-                ["Excel (.xlsx)", "CSV (.csv)"],
-                help="Choose the format for downloading the extracted data"
-            )
-        
-        st.markdown("---")
-        
-        # Generate download buttons
-        col1, col2 = st.columns(2)
-        
-        if download_format == "Excel (.xlsx)":
-            with col1:
-                excel_data = create_excel_file(st.session_state.extracted_tables, merge_tables)
-                filename = f"{uploaded_file.name.rsplit('.', 1)[0]}_tables.xlsx"
-                st.download_button(
-                    label="📥 Download Excel File",
-                    data=excel_data,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                    use_container_width=True
-                )
-            with col2:
-                if merge_tables:
-                    st.info("All tables will be in one sheet")
+        if download_mode == "Merged table (if configured)":
+            if st.session_state.merged_preview is not None:
+                st.success("✅ Merged table is ready for download")
+                
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    format_choice = st.selectbox("File format", ["Excel (.xlsx)", "CSV (.csv)"])
+                
+                # Prepare data
+                merged_df = st.session_state.merged_preview
+                tables_for_download = [(1, merged_df)]  # Single merged table
+                
+                col1, col2 = st.columns(2)
+                
+                if format_choice == "Excel (.xlsx)":
+                    with col1:
+                        excel_data = create_excel_file(tables_for_download, merge_tables=True)
+                        st.download_button(
+                            label="📥 Download Merged Excel",
+                            data=excel_data,
+                            file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_merged.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary",
+                            use_container_width=True
+                        )
                 else:
-                    st.info(f"Each table will be in a separate sheet ({len(st.session_state.extracted_tables)} sheets)")
+                    with col1:
+                        csv_data = create_csv_file(tables_for_download, merge_tables=True)
+                        st.download_button(
+                            label="📥 Download Merged CSV",
+                            data=csv_data,
+                            file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_merged.csv",
+                            mime="text/csv",
+                            type="primary",
+                            use_container_width=True
+                        )
+            else:
+                st.warning("⚠️ No merged table configured. Please create a merge preview first.")
         
-        else:  # CSV
+        else:  # Individual tables
+            col1, col2 = st.columns([1, 1])
+            
             with col1:
-                csv_data = create_csv_file(st.session_state.extracted_tables, merge_tables)
-                filename = f"{uploaded_file.name.rsplit('.', 1)[0]}_tables.csv"
-                st.download_button(
-                    label="📥 Download CSV File",
-                    data=csv_data,
-                    file_name=filename,
-                    mime="text/csv",
-                    type="primary",
-                    use_container_width=True
+                merge_individual = st.checkbox(
+                    "Combine all individual tables",
+                    value=False,
+                    help="Merge all tables into one file/sheet (simple concatenation)"
                 )
+            
             with col2:
-                if merge_tables:
-                    st.info("All tables will be merged into one CSV")
-                else:
-                    st.info(f"All tables will be in one CSV with separators")
+                format_choice = st.selectbox("File format", ["Excel (.xlsx)", "CSV (.csv)"])
+            
+            # Prepare edited tables for download
+            tables_for_download = []
+            for table in st.session_state.extracted_tables:
+                table_id = table['id']
+                df = st.session_state.edited_tables.get(table_id, table['dataframe'])
+                tables_for_download.append((table['page'], df))
+            
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            
+            if format_choice == "Excel (.xlsx)":
+                with col1:
+                    excel_data = create_excel_file(tables_for_download, merge_individual)
+                    st.download_button(
+                        label="📥 Download Excel File",
+                        data=excel_data,
+                        file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_tables.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True
+                    )
+                with col2:
+                    if merge_individual:
+                        st.info("All tables in one sheet")
+                    else:
+                        st.info(f"Each table in separate sheet ({len(tables_for_download)} sheets)")
+            else:
+                with col1:
+                    csv_data = create_csv_file(tables_for_download, merge_individual)
+                    st.download_button(
+                        label="📥 Download CSV File",
+                        data=csv_data,
+                        file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_tables.csv",
+                        mime="text/csv",
+                        type="primary",
+                        use_container_width=True
+                    )
+                with col2:
+                    if merge_individual:
+                        st.info("All tables merged in CSV")
+                    else:
+                        st.info("All tables in CSV with separators")
 
 else:
-    # Show helpful tips when no file is uploaded
     st.info("👆 Please upload a PDF file to get started")
     
     with st.expander("💡 Tips for best results"):
         st.markdown("""
         - **Use PDFs with clear table structures** - Tables with visible borders work best
         - **Check your PDF** - Make sure tables aren't images (scanned PDFs may not work)
-        - **Page selection** - If you have a large PDF, extract only the pages you need
-        - **Preview before downloading** - Always check the preview to ensure data was extracted correctly
-        - **Format choice** - Use Excel for multiple sheets, CSV for simple data
+        - **Edit tables** - Fix any extraction errors by editing headers and data directly
+        - **Smart merging** - Automatically align columns with the same name across tables
+        - **Preview before downloading** - Always check the preview to ensure data is correct
         """)
