@@ -27,13 +27,14 @@ if 'merged_preview' not in st.session_state:
 if 'extraction_method' not in st.session_state:
     st.session_state.extraction_method = None
 
-def extract_tables_from_pdf(pdf_file, selected_pages: Optional[List[int]] = None) -> Tuple[List[Dict[str, Any]], str]:
+def extract_tables_from_pdf(pdf_file, selected_pages: Optional[List[int]] = None, use_first_row_as_header: bool = True) -> Tuple[List[Dict[str, Any]], str]:
     """
     Extract tables from PDF file using pdfplumber, with tabula-py as fallback.
     
     Args:
         pdf_file: Uploaded PDF file
         selected_pages: List of page numbers to extract from (0-indexed), or None for all pages
+        use_first_row_as_header: If True, use first row as headers; if False, use generic headers (Column_0, Column_1, etc.)
     
     Returns:
         Tuple of (List of dictionaries containing table metadata and data, extraction method used)
@@ -52,24 +53,37 @@ def extract_tables_from_pdf(pdf_file, selected_pages: Optional[List[int]] = None
                 tables = page.extract_tables()
                 
                 for table_idx, table in enumerate(tables):
-                    if table and len(table) > 0 and len(table) > 1:
+                    if table and len(table) > 0:
                         try:
-                            # Handle None values in headers
-                            headers = [str(h) if h is not None else f"Column_{i}" for i, h in enumerate(table[0])]
-                            # Create DataFrame with safe headers
-                            df = pd.DataFrame(table[1:], columns=headers)
-                            # Clean up empty columns and rows
-                            df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+                            if use_first_row_as_header:
+                                # Handle None values in headers
+                                headers = [str(h) if h is not None else f"Column_{i}" for i, h in enumerate(table[0])]
+                                # Create DataFrame with first row as headers
+                                if len(table) > 1:
+                                    df = pd.DataFrame(table[1:], columns=headers)
+                                else:
+                                    # Single row table - treat as header-only, create empty DataFrame with those columns
+                                    df = pd.DataFrame(columns=headers)
+                            else:
+                                # Use generic headers and include all rows as data
+                                num_cols = len(table[0]) if table else 0
+                                headers = [f"Column_{i}" for i in range(num_cols)]
+                                df = pd.DataFrame(table, columns=headers)
                             
-                            if not df.empty:
-                                tables_data.append({
-                                    'id': table_id,
-                                    'page': page_num + 1,  # 1-indexed for display
-                                    'original_headers': list(df.columns),
-                                    'dataframe': df.copy(),
-                                    'method': 'pdfplumber'
-                                })
-                                table_id += 1
+                            # Clean up empty rows and columns only if we have data rows
+                            # For header-only tables, preserve the column structure
+                            if len(df) > 0:
+                                df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+                            
+                            # Store table even if empty (header-only) to allow user to fill in data
+                            tables_data.append({
+                                'id': table_id,
+                                'page': page_num + 1,  # 1-indexed for display
+                                'original_headers': list(df.columns),
+                                'dataframe': df.copy(),
+                                'method': 'pdfplumber'
+                            })
+                            table_id += 1
                         except Exception as e:
                             continue
     
@@ -86,31 +100,48 @@ def extract_tables_from_pdf(pdf_file, selected_pages: Optional[List[int]] = None
                 page_list = "all"
             
             # Extract tables using tabula
-            tabula_tables = tabula.read_pdf(
-                pdf_file,
-                pages=page_list,
-                multiple_tables=True,
-                silent=True
-            )
+            # tabula.read_pdf has a 'header' parameter: None means no header row
+            if use_first_row_as_header:
+                tabula_tables = tabula.read_pdf(
+                    pdf_file,
+                    pages=page_list,
+                    multiple_tables=True,
+                    silent=True
+                )
+            else:
+                # Extract without treating first row as header
+                tabula_tables = tabula.read_pdf(
+                    pdf_file,
+                    pages=page_list,
+                    multiple_tables=True,
+                    silent=True,
+                    pandas_options={'header': None}
+                )
             
             # Process tabula results
             for idx, df in enumerate(tabula_tables):
-                if df is not None and not df.empty:
-                    # Clean up the dataframe
-                    df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+                if df is not None:
+                    # If not using first row as header, apply generic column names
+                    if not use_first_row_as_header and df.columns.dtype == 'int64':
+                        df.columns = [f"Column_{i}" for i in range(len(df.columns))]
                     
-                    if not df.empty:
-                        # Try to determine which page this table came from
-                        page_num = selected_pages[min(idx, len(selected_pages) - 1)] + 1 if selected_pages else idx + 1
-                        
-                        tables_data.append({
-                            'id': table_id,
-                            'page': page_num,
-                            'original_headers': list(df.columns),
-                            'dataframe': df.copy(),
-                            'method': 'tabula-py'
-                        })
-                        table_id += 1
+                    # Clean up the dataframe only if we have data rows
+                    # For header-only tables, preserve the column structure
+                    if len(df) > 0:
+                        df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+                    
+                    # Store table even if empty (header-only) to allow user to fill in data
+                    # Try to determine which page this table came from
+                    page_num = selected_pages[min(idx, len(selected_pages) - 1)] + 1 if selected_pages else idx + 1
+                    
+                    tables_data.append({
+                        'id': table_id,
+                        'page': page_num,
+                        'original_headers': list(df.columns),
+                        'dataframe': df.copy(),
+                        'method': 'tabula-py'
+                    })
+                    table_id += 1
         except Exception as e:
             # If tabula also fails, return empty result with error info
             extraction_method = f"tabula-py (failed: {str(e)[:50]})"
@@ -223,9 +254,10 @@ if uploaded_file is not None:
     
     st.divider()
     
-    # Page selection
-    st.subheader("📑 Page Selection")
-    col1, col2 = st.columns([1, 2])
+    # Page selection and extraction settings
+    st.subheader("📑 Extraction Settings")
+    
+    col1, col2 = st.columns([1, 1])
     
     with col1:
         extraction_mode = st.radio(
@@ -234,36 +266,42 @@ if uploaded_file is not None:
             help="Choose whether to extract tables from all pages or only selected pages"
         )
     
+    with col2:
+        use_first_row_as_header = st.checkbox(
+            "First row contains headers",
+            value=True,
+            help="When checked, the first row of each table will be used as column headers. Uncheck to use generic headers (Column_0, Column_1, etc.) and keep all data rows."
+        )
+    
     selected_pages = None
     if extraction_mode == "Specific pages":
-        with col2:
-            st.markdown("**Select page numbers:**")
-            page_input = st.text_input(
-                "Enter page numbers",
-                placeholder="e.g., 1,3,5-7",
-                help="Enter page numbers separated by commas. You can use ranges like '5-7'."
-            )
-            
-            if page_input:
-                try:
-                    pages = []
-                    parts = page_input.split(',')
-                    for part in parts:
-                        part = part.strip()
-                        if '-' in part:
-                            start, end = map(int, part.split('-'))
-                            pages.extend(range(start - 1, end))
-                        else:
-                            pages.append(int(part) - 1)
-                    
-                    selected_pages = [p for p in pages if 0 <= p < total_pages]
-                    
-                    if selected_pages:
-                        st.success(f"Will extract from {len(selected_pages)} page(s): {', '.join(str(p+1) for p in sorted(selected_pages))}")
+        st.markdown("**Select page numbers:**")
+        page_input = st.text_input(
+            "Enter page numbers",
+            placeholder="e.g., 1,3,5-7",
+            help="Enter page numbers separated by commas. You can use ranges like '5-7'."
+        )
+        
+        if page_input:
+            try:
+                pages = []
+                parts = page_input.split(',')
+                for part in parts:
+                    part = part.strip()
+                    if '-' in part:
+                        start, end = map(int, part.split('-'))
+                        pages.extend(range(start - 1, end))
                     else:
-                        st.warning("No valid page numbers entered.")
-                except ValueError:
-                    st.error("Invalid format. Use numbers separated by commas (e.g., 1,3,5-7)")
+                        pages.append(int(part) - 1)
+                
+                selected_pages = [p for p in pages if 0 <= p < total_pages]
+                
+                if selected_pages:
+                    st.success(f"Will extract from {len(selected_pages)} page(s): {', '.join(str(p+1) for p in sorted(selected_pages))}")
+                else:
+                    st.warning("No valid page numbers entered.")
+            except ValueError:
+                st.error("Invalid format. Use numbers separated by commas (e.g., 1,3,5-7)")
     
     st.divider()
     
@@ -271,12 +309,13 @@ if uploaded_file is not None:
     if st.button("🔍 Extract Tables", type="primary", use_container_width=True):
         with st.spinner("Extracting tables from PDF..."):
             uploaded_file.seek(0)
-            tables_data, extraction_method = extract_tables_from_pdf(uploaded_file, selected_pages)
+            tables_data, extraction_method = extract_tables_from_pdf(uploaded_file, selected_pages, use_first_row_as_header)
             st.session_state.extracted_tables = tables_data
             st.session_state.edited_tables = {}
             st.session_state.merge_config = None
             st.session_state.merged_preview = None
             st.session_state.extraction_method = extraction_method
+            st.session_state.use_first_row_as_header = use_first_row_as_header
             
             if len(tables_data) > 0:
                 if extraction_method == "tabula-py":
