@@ -325,8 +325,8 @@ if uploaded_file is not None:
         
         st.divider()
         
-        # Merge Tables Section
-        if len(st.session_state.extracted_tables) > 1:
+        # Merge Tables Section (only show for 2-5 tables)
+        if 1 < len(st.session_state.extracted_tables) <= 5:
             st.subheader("🔀 Merge Tables (Optional)")
             
             with st.expander("Configure Table Merge", expanded=False):
@@ -433,67 +433,16 @@ if uploaded_file is not None:
         # Download section
         st.subheader("💾 Download Options")
         
-        # Determine what to download
-        download_mode = st.radio(
-            "What would you like to download?",
-            ["Individual tables (edited)", "Merged table (if configured)"],
-            help="Choose whether to download individual tables or the merged result"
-        )
+        # Check if we have many tables (>5)
+        many_tables = len(st.session_state.extracted_tables) > 5
         
-        if download_mode == "Merged table (if configured)":
-            if st.session_state.merged_preview is not None:
-                st.success("✅ Merged table is ready for download")
-                
-                col1, col2 = st.columns([1, 1])
-                
-                with col1:
-                    format_choice = st.selectbox("File format", ["Excel (.xlsx)", "CSV (.csv)"])
-                
-                # Prepare data
-                merged_df = st.session_state.merged_preview
-                tables_for_download = [(1, merged_df)]  # Single merged table
-                
-                col1, col2 = st.columns(2)
-                
-                if format_choice == "Excel (.xlsx)":
-                    with col1:
-                        excel_data = create_excel_file(tables_for_download, merge_tables=True)
-                        st.download_button(
-                            label="📥 Download Merged Excel",
-                            data=excel_data,
-                            file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_merged.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            type="primary",
-                            use_container_width=True
-                        )
-                else:
-                    with col1:
-                        csv_data = create_csv_file(tables_for_download, merge_tables=True)
-                        st.download_button(
-                            label="📥 Download Merged CSV",
-                            data=csv_data,
-                            file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_merged.csv",
-                            mime="text/csv",
-                            type="primary",
-                            use_container_width=True
-                        )
-            else:
-                st.warning("⚠️ No merged table configured. Please create a merge preview first.")
-        
-        else:  # Individual tables
-            col1, col2 = st.columns([1, 1])
+        if many_tables:
+            # For >5 tables, simplify the download - just concatenate all
+            st.info(f"📊 You have {len(st.session_state.extracted_tables)} tables. All tables will be automatically stacked vertically in a single sheet/file.")
             
-            with col1:
-                merge_individual = st.checkbox(
-                    "Combine all individual tables",
-                    value=False,
-                    help="Merge all tables into one file/sheet (simple concatenation)"
-                )
+            format_choice = st.selectbox("File format", ["Excel (.xlsx)", "CSV (.csv)"])
             
-            with col2:
-                format_choice = st.selectbox("File format", ["Excel (.xlsx)", "CSV (.csv)"])
-            
-            # Prepare edited tables for download
+            # Prepare edited tables for download (all concatenated)
             tables_for_download = []
             for table in st.session_state.extracted_tables:
                 table_id = table['id']
@@ -505,36 +454,138 @@ if uploaded_file is not None:
             
             if format_choice == "Excel (.xlsx)":
                 with col1:
-                    excel_data = create_excel_file(tables_for_download, merge_individual)
+                    excel_data = create_excel_file(tables_for_download, merge_tables=True)
                     st.download_button(
-                        label="📥 Download Excel File",
+                        label="📥 Download All Tables (Excel)",
                         data=excel_data,
-                        file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_tables.xlsx",
+                        file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_all_tables.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         type="primary",
                         use_container_width=True
                     )
                 with col2:
-                    if merge_individual:
-                        st.info("All tables in one sheet")
-                    else:
-                        st.info(f"Each table in separate sheet ({len(tables_for_download)} sheets)")
+                    st.info(f"All {len(tables_for_download)} tables stacked in one sheet")
             else:
                 with col1:
-                    csv_data = create_csv_file(tables_for_download, merge_individual)
+                    csv_data = create_csv_file(tables_for_download, merge_tables=True)
                     st.download_button(
-                        label="📥 Download CSV File",
+                        label="📥 Download All Tables (CSV)",
                         data=csv_data,
-                        file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_tables.csv",
+                        file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_all_tables.csv",
                         mime="text/csv",
                         type="primary",
                         use_container_width=True
                     )
                 with col2:
-                    if merge_individual:
-                        st.info("All tables merged in CSV")
+                    st.info(f"All {len(tables_for_download)} tables stacked in one file")
+        else:
+            # For <=5 tables, keep the current merge/individual choice
+            # Determine what to download
+            if len(st.session_state.extracted_tables) > 1:
+                download_mode = st.radio(
+                    "What would you like to download?",
+                    ["Individual tables (edited)", "Merged table (if configured)"],
+                    help="Choose whether to download individual tables or the merged result"
+                )
+            else:
+                # Only one table, no merge option needed
+                download_mode = "Individual tables (edited)"
+            
+            if download_mode == "Merged table (if configured)":
+                if st.session_state.merged_preview is not None:
+                    st.success("✅ Merged table is ready for download")
+                    
+                    col1, col2 = st.columns([1, 1])
+                    
+                    with col1:
+                        format_choice = st.selectbox("File format", ["Excel (.xlsx)", "CSV (.csv)"])
+                    
+                    # Prepare data
+                    merged_df = st.session_state.merged_preview
+                    tables_for_download = [(1, merged_df)]  # Single merged table
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    if format_choice == "Excel (.xlsx)":
+                        with col1:
+                            excel_data = create_excel_file(tables_for_download, merge_tables=True)
+                            st.download_button(
+                                label="📥 Download Merged Excel",
+                                data=excel_data,
+                                file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_merged.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                type="primary",
+                                use_container_width=True
+                            )
                     else:
-                        st.info("All tables in CSV with separators")
+                        with col1:
+                            csv_data = create_csv_file(tables_for_download, merge_tables=True)
+                            st.download_button(
+                                label="📥 Download Merged CSV",
+                                data=csv_data,
+                                file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_merged.csv",
+                                mime="text/csv",
+                                type="primary",
+                                use_container_width=True
+                            )
+                else:
+                    st.warning("⚠️ No merged table configured. Please create a merge preview first.")
+            
+            else:  # Individual tables
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    merge_individual = st.checkbox(
+                        "Combine all individual tables",
+                        value=False,
+                        help="Merge all tables into one file/sheet (simple concatenation)"
+                    )
+                
+                with col2:
+                    format_choice = st.selectbox("File format", ["Excel (.xlsx)", "CSV (.csv)"])
+                
+                # Prepare edited tables for download
+                tables_for_download = []
+                for table in st.session_state.extracted_tables:
+                    table_id = table['id']
+                    df = st.session_state.edited_tables.get(table_id, table['dataframe'])
+                    tables_for_download.append((table['page'], df))
+                
+                st.markdown("---")
+                col1, col2 = st.columns(2)
+                
+                if format_choice == "Excel (.xlsx)":
+                    with col1:
+                        excel_data = create_excel_file(tables_for_download, merge_individual)
+                        st.download_button(
+                            label="📥 Download Excel File",
+                            data=excel_data,
+                            file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_tables.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary",
+                            use_container_width=True
+                        )
+                    with col2:
+                        if merge_individual:
+                            st.info("All tables in one sheet")
+                        else:
+                            st.info(f"Each table in separate sheet ({len(tables_for_download)} sheets)")
+                else:
+                    with col1:
+                        csv_data = create_csv_file(tables_for_download, merge_individual)
+                        st.download_button(
+                            label="📥 Download CSV File",
+                            data=csv_data,
+                            file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_tables.csv",
+                            mime="text/csv",
+                            type="primary",
+                            use_container_width=True
+                        )
+                    with col2:
+                        if merge_individual:
+                            st.info("All tables merged in CSV")
+                        else:
+                            st.info("All tables in CSV with separators")
 
 else:
     st.info("👆 Please upload a PDF file to get started")
