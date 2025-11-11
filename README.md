@@ -30,7 +30,7 @@ This application is ready to be deployed on [Streamlit Community Cloud](https://
 
 3. **Deploy the App**
    - Click "New app"
-   - Select your repository: `confox51/pdf_data_extractor`
+   - Select your repository: `your-username/pdf_data_extractor` (replace `your-username` with your GitHub username)
    - Set the main file path: `app.py`
    - Click "Deploy"
 
