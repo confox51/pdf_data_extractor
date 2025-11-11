@@ -54,7 +54,7 @@ The following files are configured for Streamlit Community Cloud deployment:
 
 ```bash
 # Clone the repository
-git clone https://github.com/confox51/pdf_data_extractor.git
+git clone https://github.com/your-username/pdf_data_extractor.git
 cd pdf_data_extractor
 
 # Install Python dependencies
