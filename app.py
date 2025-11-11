@@ -6,6 +6,15 @@ from typing import List, Tuple, Dict, Any, Optional
 import xlsxwriter
 import tabula
 
+# Try to import camelot - make it optional in case it's not available on deployment
+CAMELOT_AVAILABLE = False
+try:
+    import camelot
+    CAMELOT_AVAILABLE = True
+except ImportError as e:
+    # Camelot not available - app will still work with other engines
+    pass
+
 # Configure page
 st.set_page_config(
     page_title="PDF Table Extractor",
@@ -26,125 +35,230 @@ if 'merged_preview' not in st.session_state:
     st.session_state.merged_preview = None
 if 'extraction_method' not in st.session_state:
     st.session_state.extraction_method = None
+if 'selected_engine' not in st.session_state:
+    st.session_state.selected_engine = 'pdfplumber'
 
-def extract_tables_from_pdf(pdf_file, selected_pages: Optional[List[int]] = None, use_first_row_as_header: bool = True) -> Tuple[List[Dict[str, Any]], str]:
+def extract_tables_from_pdf(pdf_file, selected_pages: Optional[List[int]] = None, use_first_row_as_header: bool = True, engine: str = 'pdfplumber') -> Tuple[List[Dict[str, Any]], str]:
     """
-    Extract tables from PDF file using pdfplumber, with tabula-py as fallback.
+    Extract tables from PDF file using the specified extraction engine.
     
     Args:
         pdf_file: Uploaded PDF file
         selected_pages: List of page numbers to extract from (0-indexed), or None for all pages
         use_first_row_as_header: If True, use first row as headers; if False, use generic headers (Column_0, Column_1, etc.)
+        engine: Extraction engine to use ('pdfplumber', 'tabula-py', 'camelot-lattice', 'camelot-stream')
     
     Returns:
         Tuple of (List of dictionaries containing table metadata and data, extraction method used)
     """
+    # Route to the appropriate extraction method based on engine
+    if engine.startswith('camelot'):
+        flavor = 'lattice' if engine == 'camelot-lattice' else 'stream'
+        return extract_with_camelot(pdf_file, selected_pages, use_first_row_as_header, flavor)
+    elif engine == 'tabula-py':
+        # Use tabula-py directly
+        return extract_with_tabula(pdf_file, selected_pages, use_first_row_as_header)
+    else:
+        # Default to pdfplumber
+        return extract_with_pdfplumber(pdf_file, selected_pages, use_first_row_as_header)
+
+def extract_with_pdfplumber(pdf_file, selected_pages: Optional[List[int]] = None, use_first_row_as_header: bool = True) -> Tuple[List[Dict[str, Any]], str]:
+    """Extract tables using pdfplumber."""
     tables_data = []
     table_id = 0
     extraction_method = "pdfplumber"
     
-    # Try pdfplumber first
-    with pdfplumber.open(pdf_file) as pdf:
-        pages_to_process = selected_pages if selected_pages else range(len(pdf.pages))
-        
-        for page_num in pages_to_process:
-            if page_num < len(pdf.pages):
-                page = pdf.pages[page_num]
-                tables = page.extract_tables()
-                
-                for table_idx, table in enumerate(tables):
-                    if table and len(table) > 0:
-                        try:
-                            if use_first_row_as_header:
-                                # Handle None values in headers
-                                headers = [str(h) if h is not None else f"Column_{i}" for i, h in enumerate(table[0])]
-                                # Create DataFrame with first row as headers
-                                if len(table) > 1:
-                                    df = pd.DataFrame(table[1:], columns=headers)
-                                else:
-                                    # Single row table - treat as header-only, create empty DataFrame with those columns
-                                    df = pd.DataFrame(columns=headers)
-                            else:
-                                # Use generic headers and include all rows as data
-                                num_cols = len(table[0]) if table else 0
-                                headers = [f"Column_{i}" for i in range(num_cols)]
-                                df = pd.DataFrame(table, columns=headers)
-                            
-                            # Clean up empty rows and columns only if we have data rows
-                            # For header-only tables, preserve the column structure
-                            if len(df) > 0:
-                                df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
-                            
-                            # Store table even if empty (header-only) to allow user to fill in data
-                            tables_data.append({
-                                'id': table_id,
-                                'page': page_num + 1,  # 1-indexed for display
-                                'original_headers': list(df.columns),
-                                'dataframe': df.copy(),
-                                'method': 'pdfplumber'
-                            })
-                            table_id += 1
-                        except Exception as e:
-                            continue
-    
-    # If no tables found with pdfplumber, try tabula-py
-    if len(tables_data) == 0:
-        try:
-            extraction_method = "tabula-py"
-            pdf_file.seek(0)
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            pages_to_process = selected_pages if selected_pages else range(len(pdf.pages))
             
+            for page_num in pages_to_process:
+                if page_num < len(pdf.pages):
+                    page = pdf.pages[page_num]
+                    tables = page.extract_tables()
+                    
+                    for table_idx, table in enumerate(tables):
+                        if table and len(table) > 0:
+                            try:
+                                if use_first_row_as_header:
+                                    # Handle None values in headers
+                                    headers = [str(h) if h is not None else f"Column_{i}" for i, h in enumerate(table[0])]
+                                    # Create DataFrame with first row as headers
+                                    if len(table) > 1:
+                                        df = pd.DataFrame(table[1:], columns=headers)
+                                    else:
+                                        # Single row table - treat as header-only, create empty DataFrame with those columns
+                                        df = pd.DataFrame(columns=headers)
+                                else:
+                                    # Use generic headers and include all rows as data
+                                    num_cols = len(table[0]) if table else 0
+                                    headers = [f"Column_{i}" for i in range(num_cols)]
+                                    df = pd.DataFrame(table, columns=headers)
+                                
+                                # Clean up empty rows and columns only if we have data rows
+                                # For header-only tables, preserve the column structure
+                                if len(df) > 0:
+                                    df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+                                
+                                # Store table even if empty (header-only) to allow user to fill in data
+                                tables_data.append({
+                                    'id': table_id,
+                                    'page': page_num + 1,  # 1-indexed for display
+                                    'original_headers': list(df.columns),
+                                    'dataframe': df.copy(),
+                                    'method': 'pdfplumber'
+                                })
+                                table_id += 1
+                            except Exception as e:
+                                continue
+    except Exception as e:
+        extraction_method = f"pdfplumber (failed: {str(e)[:50]})"
+    
+    return tables_data, extraction_method
+
+def extract_with_tabula(pdf_file, selected_pages: Optional[List[int]] = None, use_first_row_as_header: bool = True) -> Tuple[List[Dict[str, Any]], str]:
+    """Extract tables using tabula-py."""
+    tables_data = []
+    table_id = 0
+    extraction_method = "tabula-py"
+    
+    try:
+        pdf_file.seek(0)
+        
+        # Determine which pages to extract
+        if selected_pages:
+            page_list = [p + 1 for p in selected_pages]  # tabula uses 1-indexed pages
+        else:
+            page_list = "all"
+        
+        # Extract tables using tabula
+        # tabula.read_pdf has a 'header' parameter: None means no header row
+        if use_first_row_as_header:
+            tabula_tables = tabula.read_pdf(
+                pdf_file,
+                pages=page_list,
+                multiple_tables=True,
+                silent=True
+            )
+        else:
+            # Extract without treating first row as header
+            tabula_tables = tabula.read_pdf(
+                pdf_file,
+                pages=page_list,
+                multiple_tables=True,
+                silent=True,
+                pandas_options={'header': None}
+            )
+        
+        # Process tabula results
+        for idx, df in enumerate(tabula_tables):
+            if df is not None:
+                # If not using first row as header, apply generic column names
+                if not use_first_row_as_header and df.columns.dtype == 'int64':
+                    df.columns = [f"Column_{i}" for i in range(len(df.columns))]
+                
+                # Clean up the dataframe only if we have data rows
+                # For header-only tables, preserve the column structure
+                if len(df) > 0:
+                    df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
+                
+                # Store table even if empty (header-only) to allow user to fill in data
+                # Try to determine which page this table came from
+                page_num = selected_pages[min(idx, len(selected_pages) - 1)] + 1 if selected_pages else idx + 1
+                
+                tables_data.append({
+                    'id': table_id,
+                    'page': page_num,
+                    'original_headers': list(df.columns),
+                    'dataframe': df.copy(),
+                    'method': 'tabula-py'
+                })
+                table_id += 1
+    except Exception as e:
+        extraction_method = f"tabula-py (failed: {str(e)[:50]})"
+    
+    return tables_data, extraction_method
+
+def extract_with_camelot(pdf_file, selected_pages: Optional[List[int]] = None, use_first_row_as_header: bool = True, flavor: str = 'lattice') -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Extract tables from PDF file using Camelot.
+    
+    Args:
+        pdf_file: Uploaded PDF file
+        selected_pages: List of page numbers to extract from (0-indexed), or None for all pages
+        use_first_row_as_header: If True, use first row as headers; if False, use generic headers
+        flavor: Camelot flavor to use ('lattice' or 'stream')
+    
+    Returns:
+        Tuple of (List of dictionaries containing table metadata and data, extraction method used)
+    """
+    # Check if Camelot is available
+    if not CAMELOT_AVAILABLE:
+        return [], f"camelot-{flavor} (not available)"
+    
+    tables_data = []
+    table_id = 0
+    extraction_method = f"camelot-{flavor}"
+    
+    try:
+        # Camelot requires a file path, so we need to save the uploaded file temporarily
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            tmp_file.write(pdf_file.getvalue())
+            tmp_path = tmp_file.name
+        
+        try:
             # Determine which pages to extract
             if selected_pages:
-                page_list = [p + 1 for p in selected_pages]  # tabula uses 1-indexed pages
+                # Camelot uses 1-indexed pages, comma-separated string
+                page_list = ','.join([str(p + 1) for p in selected_pages])
             else:
-                page_list = "all"
+                page_list = 'all'
             
-            # Extract tables using tabula
-            # tabula.read_pdf has a 'header' parameter: None means no header row
-            if use_first_row_as_header:
-                tabula_tables = tabula.read_pdf(
-                    pdf_file,
-                    pages=page_list,
-                    multiple_tables=True,
-                    silent=True
-                )
-            else:
-                # Extract without treating first row as header
-                tabula_tables = tabula.read_pdf(
-                    pdf_file,
-                    pages=page_list,
-                    multiple_tables=True,
-                    silent=True,
-                    pandas_options={'header': None}
-                )
+            # Extract tables using camelot
+            tables = camelot.read_pdf(tmp_path, pages=page_list, flavor=flavor, suppress_stdout=True)
             
-            # Process tabula results
-            for idx, df in enumerate(tabula_tables):
-                if df is not None:
-                    # If not using first row as header, apply generic column names
-                    if not use_first_row_as_header and df.columns.dtype == 'int64':
+            # Process camelot results
+            for table in tables:
+                df = table.df
+                
+                if df is not None and not df.empty:
+                    if use_first_row_as_header:
+                        # Use first row as headers
+                        if len(df) > 0:
+                            headers = [str(h) if h != '' else f"Column_{i}" for i, h in enumerate(df.iloc[0])]
+                            if len(df) > 1:
+                                df = pd.DataFrame(df.iloc[1:].values, columns=headers)
+                            else:
+                                # Single row table - treat as header-only
+                                df = pd.DataFrame(columns=headers)
+                    else:
+                        # Use generic headers
                         df.columns = [f"Column_{i}" for i in range(len(df.columns))]
                     
-                    # Clean up the dataframe only if we have data rows
-                    # For header-only tables, preserve the column structure
+                    # Clean up empty rows and columns only if we have data rows
                     if len(df) > 0:
                         df = df.dropna(how='all', axis=1).dropna(how='all', axis=0)
                     
-                    # Store table even if empty (header-only) to allow user to fill in data
-                    # Try to determine which page this table came from
-                    page_num = selected_pages[min(idx, len(selected_pages) - 1)] + 1 if selected_pages else idx + 1
+                    # Get page number from table
+                    page_num = table.page
                     
                     tables_data.append({
                         'id': table_id,
-                        'page': page_num,
+                        'page': page_num,  # Already 1-indexed from camelot
                         'original_headers': list(df.columns),
                         'dataframe': df.copy(),
-                        'method': 'tabula-py'
+                        'method': f'camelot-{flavor}'
                     })
                     table_id += 1
-        except Exception as e:
-            # If tabula also fails, return empty result with error info
-            extraction_method = f"tabula-py (failed: {str(e)[:50]})"
+        finally:
+            # Clean up temporary file
+            import os
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+                
+    except Exception as e:
+        extraction_method = f"camelot-{flavor} (failed: {str(e)[:50]})"
     
     return tables_data, extraction_method
 
@@ -223,12 +337,61 @@ st.markdown("""
 Welcome! This tool helps you extract, edit, and merge tables from PDF files.
 
 ### How to use:
-1. **Upload** your PDF file
-2. **Select pages** to extract from (optional)
-3. **Edit tables** - modify headers and data as needed
-4. **Merge tables** - combine multiple tables with smart column mapping (optional)
-5. **Download** your data in CSV or Excel format
+1. **Select extraction engine** - choose your preferred PDF parsing method
+2. **Upload** your PDF file
+3. **Select pages** to extract from (optional)
+4. **Edit tables** - modify headers and data as needed
+5. **Merge tables** - combine multiple tables with smart column mapping (optional)
+6. **Download** your data in CSV or Excel format
 """)
+
+st.divider()
+
+# Engine Selection
+st.subheader("🔧 Select Extraction Engine")
+st.markdown("""
+Choose the PDF parsing engine that works best for your document:
+""")
+
+# Determine number of columns based on Camelot availability
+if CAMELOT_AVAILABLE:
+    col1, col2, col3, col4 = st.columns(4)
+else:
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+
+with col1:
+    if st.button("📘 PDFPlumber", use_container_width=True, type="primary" if st.session_state.selected_engine == 'pdfplumber' else "secondary"):
+        st.session_state.selected_engine = 'pdfplumber'
+
+with col2:
+    if st.button("📗 Tabula", use_container_width=True, type="primary" if st.session_state.selected_engine == 'tabula-py' else "secondary"):
+        st.session_state.selected_engine = 'tabula-py'
+
+if CAMELOT_AVAILABLE:
+    with col3:
+        if st.button("📙 Camelot (Lattice)", use_container_width=True, type="primary" if st.session_state.selected_engine == 'camelot-lattice' else "secondary"):
+            st.session_state.selected_engine = 'camelot-lattice'
+
+    with col4:
+        if st.button("📕 Camelot (Stream)", use_container_width=True, type="primary" if st.session_state.selected_engine == 'camelot-stream' else "secondary"):
+            st.session_state.selected_engine = 'camelot-stream'
+
+# Display info about selected engine
+engine_info = {
+    'pdfplumber': "**PDFPlumber** - Good general-purpose extractor, works well with most PDFs",
+    'tabula-py': "**Tabula-py** - Java-based extractor, good for complex tables",
+}
+
+if CAMELOT_AVAILABLE:
+    engine_info['camelot-lattice'] = "**Camelot Lattice** - Best for tables with visible borders/lines"
+    engine_info['camelot-stream'] = "**Camelot Stream** - Best for tables without visible borders"
+
+# If selected engine is camelot but camelot is not available, fall back to pdfplumber
+if st.session_state.selected_engine.startswith('camelot') and not CAMELOT_AVAILABLE:
+    st.session_state.selected_engine = 'pdfplumber'
+    st.warning("⚠️ Camelot is not available on this platform. Defaulting to PDFPlumber.")
+
+st.info(f"**Selected:** {engine_info[st.session_state.selected_engine]}")
 
 st.divider()
 
@@ -307,9 +470,14 @@ if uploaded_file is not None:
     
     # Extract button
     if st.button("🔍 Extract Tables", type="primary", use_container_width=True):
-        with st.spinner("Extracting tables from PDF..."):
+        with st.spinner(f"Extracting tables from PDF using {st.session_state.selected_engine}..."):
             uploaded_file.seek(0)
-            tables_data, extraction_method = extract_tables_from_pdf(uploaded_file, selected_pages, use_first_row_as_header)
+            tables_data, extraction_method = extract_tables_from_pdf(
+                uploaded_file, 
+                selected_pages, 
+                use_first_row_as_header,
+                engine=st.session_state.selected_engine
+            )
             st.session_state.extracted_tables = tables_data
             st.session_state.edited_tables = {}
             st.session_state.merge_config = None
@@ -318,15 +486,11 @@ if uploaded_file is not None:
             st.session_state.use_first_row_as_header = use_first_row_as_header
             
             if len(tables_data) > 0:
-                if extraction_method == "tabula-py":
-                    st.success(f"✅ Successfully extracted **{len(tables_data)}** table(s) using **tabula-py** (fallback method)!")
-                    st.info("ℹ️ pdfplumber didn't find tables, so we used tabula-py as a backup extraction method.")
-                else:
-                    st.success(f"✅ Successfully extracted **{len(tables_data)}** table(s) using **pdfplumber**!")
+                st.success(f"✅ Successfully extracted **{len(tables_data)}** table(s) using **{extraction_method}**!")
             else:
                 if "failed" in extraction_method:
-                    st.error("⚠️ No tables found. Both extraction methods were tried but couldn't find recognizable tables.")
-                    st.info("💡 Tip: The PDF might contain tables in image format (scanned PDF). Try using OCR software first to convert it to text-based PDF.")
+                    st.error(f"⚠️ No tables found. {extraction_method}")
+                    st.info("💡 Tip: Try a different extraction engine or check if the PDF contains tables in image format (scanned PDF).")
                 else:
                     st.warning("⚠️ No tables found. The PDF might not contain recognizable tables, or the tables might be in image format (scanned PDF).")
     
