@@ -5,7 +5,15 @@ import io
 from typing import List, Tuple, Dict, Any, Optional
 import xlsxwriter
 import tabula
-import camelot
+
+# Try to import camelot - make it optional in case it's not available on deployment
+CAMELOT_AVAILABLE = False
+try:
+    import camelot
+    CAMELOT_AVAILABLE = True
+except ImportError as e:
+    # Camelot not available - app will still work with other engines
+    pass
 
 # Configure page
 st.set_page_config(
@@ -184,6 +192,10 @@ def extract_with_camelot(pdf_file, selected_pages: Optional[List[int]] = None, u
     Returns:
         Tuple of (List of dictionaries containing table metadata and data, extraction method used)
     """
+    # Check if Camelot is available
+    if not CAMELOT_AVAILABLE:
+        return [], f"camelot-{flavor} (not available)"
+    
     tables_data = []
     table_id = 0
     extraction_method = f"camelot-{flavor}"
@@ -341,7 +353,11 @@ st.markdown("""
 Choose the PDF parsing engine that works best for your document:
 """)
 
-col1, col2, col3, col4 = st.columns(4)
+# Determine number of columns based on Camelot availability
+if CAMELOT_AVAILABLE:
+    col1, col2, col3, col4 = st.columns(4)
+else:
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
 
 with col1:
     if st.button("📘 PDFPlumber", use_container_width=True, type="primary" if st.session_state.selected_engine == 'pdfplumber' else "secondary"):
@@ -351,21 +367,29 @@ with col2:
     if st.button("📗 Tabula", use_container_width=True, type="primary" if st.session_state.selected_engine == 'tabula-py' else "secondary"):
         st.session_state.selected_engine = 'tabula-py'
 
-with col3:
-    if st.button("📙 Camelot (Lattice)", use_container_width=True, type="primary" if st.session_state.selected_engine == 'camelot-lattice' else "secondary"):
-        st.session_state.selected_engine = 'camelot-lattice'
+if CAMELOT_AVAILABLE:
+    with col3:
+        if st.button("📙 Camelot (Lattice)", use_container_width=True, type="primary" if st.session_state.selected_engine == 'camelot-lattice' else "secondary"):
+            st.session_state.selected_engine = 'camelot-lattice'
 
-with col4:
-    if st.button("📕 Camelot (Stream)", use_container_width=True, type="primary" if st.session_state.selected_engine == 'camelot-stream' else "secondary"):
-        st.session_state.selected_engine = 'camelot-stream'
+    with col4:
+        if st.button("📕 Camelot (Stream)", use_container_width=True, type="primary" if st.session_state.selected_engine == 'camelot-stream' else "secondary"):
+            st.session_state.selected_engine = 'camelot-stream'
 
 # Display info about selected engine
 engine_info = {
     'pdfplumber': "**PDFPlumber** - Good general-purpose extractor, works well with most PDFs",
     'tabula-py': "**Tabula-py** - Java-based extractor, good for complex tables",
-    'camelot-lattice': "**Camelot Lattice** - Best for tables with visible borders/lines",
-    'camelot-stream': "**Camelot Stream** - Best for tables without visible borders"
 }
+
+if CAMELOT_AVAILABLE:
+    engine_info['camelot-lattice'] = "**Camelot Lattice** - Best for tables with visible borders/lines"
+    engine_info['camelot-stream'] = "**Camelot Stream** - Best for tables without visible borders"
+
+# If selected engine is camelot but camelot is not available, fall back to pdfplumber
+if st.session_state.selected_engine.startswith('camelot') and not CAMELOT_AVAILABLE:
+    st.session_state.selected_engine = 'pdfplumber'
+    st.warning("⚠️ Camelot is not available on this platform. Defaulting to PDFPlumber.")
 
 st.info(f"**Selected:** {engine_info[st.session_state.selected_engine]}")
 
